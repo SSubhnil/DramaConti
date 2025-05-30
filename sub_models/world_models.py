@@ -25,26 +25,29 @@ import cv2
 
     
 class Encoder(nn.Module):
-    def __init__(self, depth=128, mults=(1, 2, 4, 2), norm='rms', act='SiLU', kernel=4, padding='same', first_stride=True, input_size=(3, 64, 64), dtype=None, device=None) -> None:
+    def __init__(self, depth=128, mults=(1, 2, 4, 2), norm='rms', act='SiLU', kernel=4, padding='same',
+                 first_stride=True, input_size=(3, 64, 64), dtype=None, device=None) -> None:
         super().__init__()
         act = getattr(nn, act)
         self.depths = [depth * mult for mult in mults]
         self.kernel = kernel
         self.stride = 2
         self.padding = (kernel - 1) // 2 if padding == 'same' else padding
-        
+
         backbone = []
         current_channels, current_height, current_width = input_size
 
         # Define convolutional layers for image inputs
         for i, depth in enumerate(self.depths):
             stride = 1 if i == 0 and first_stride else self.stride
-            conv = nn.Conv2d(in_channels=current_channels, out_channels=depth, kernel_size=kernel, stride=stride, padding=self.padding, dtype=dtype, device=device)
+            conv = nn.Conv2d(in_channels=current_channels, out_channels=depth, kernel_size=kernel, stride=stride,
+                             padding=self.padding, dtype=dtype, device=device)
             backbone.append(conv)
             backbone.append(nn.BatchNorm2d(depth, dtype=dtype, device=device))
             backbone.append(act())
-            
-            current_height, current_width = self._compute_output_dim(current_height, current_width, kernel, stride, self.padding)
+
+            current_height, current_width = self._compute_output_dim(current_height, current_width, kernel, stride,
+                                                                     self.padding)
             current_channels = depth
 
         self.backbone = nn.Sequential(*backbone)
@@ -68,20 +71,23 @@ class Encoder(nn.Module):
     
 
 class Decoder(nn.Module):
-    def __init__(self, stoch_dim, depth=128, mults=(1, 2, 4, 2), norm='rms', act='SiLU', kernel=4, padding='same', first_stride=True, last_output_dim=(256, 4, 4),input_size=(3, 64, 64), cnn_sigmoid=False, dtype=None, device=None) -> None:
+    def __init__(self, stoch_dim, depth=128, mults=(1, 2, 4, 2), norm='rms', act='SiLU', kernel=4, padding='same',
+                 first_stride=True, last_output_dim=(256, 4, 4), input_size=(3, 64, 64), cnn_sigmoid=False, dtype=None,
+                 device=None) -> None:
         super().__init__()
         act = getattr(nn, act)
         self.depths = [depth * mult for mult in mults]
         self.kernel = kernel
         self.stride = 2
         self.padding = (kernel - 1) // 2 if padding == 'same' else padding
-        self.output_padding = self.stride //2 if padding == 'same' else 0
+        self.output_padding = self.stride // 2 if padding == 'same' else 0
         self._cnn_sigmoid = cnn_sigmoid
-
 
         backbone = []
         # stem
-        backbone.append(nn.Linear(stoch_dim, last_output_dim[0] * last_output_dim[1] * last_output_dim[2], bias=True, dtype=dtype, device=device))
+        backbone.append(
+            nn.Linear(stoch_dim, last_output_dim[0] * last_output_dim[1] * last_output_dim[2], bias=True, dtype=dtype,
+                      device=device))
         backbone.append(Rearrange('B L (C H W) -> (B L) C H W', C=last_output_dim[0], H=last_output_dim[1]))
         backbone.append(nn.BatchNorm2d(last_output_dim[0], dtype=dtype, device=device))
         backbone.append(act())
@@ -91,26 +97,47 @@ class Decoder(nn.Module):
         current_channels, current_height, current_width = last_output_dim
         # Define convolutional layers for image inputs
         for i, depth in reversed(list(enumerate(self.depths[:-1]))):
-            conv = nn.ConvTranspose2d(in_channels=current_channels, out_channels=depth, kernel_size=kernel, stride=self.stride, padding=self.padding, output_padding=self.output_padding, dtype=dtype, device=device)
+            conv = nn.ConvTranspose2d(in_channels=current_channels, out_channels=depth, kernel_size=kernel,
+                                      stride=self.stride, padding=self.padding, output_padding=self.output_padding,
+                                      dtype=dtype, device=device)
             backbone.append(conv)
             backbone.append(nn.BatchNorm2d(depth, dtype=dtype, device=device))
             backbone.append(act())
-            current_height, current_width = self._compute_transposed_output_dim(current_height, current_width, kernel, self.stride, self.padding, self.output_padding)
+            current_height, current_width = self._compute_transposed_output_dim(current_height, current_width, kernel,
+                                                                                self.stride, self.padding,
+                                                                                self.output_padding)
             current_channels = depth
 
         stride = 1 if i == 0 and first_stride else self.stride
-        backbone.append(
-            nn.ConvTranspose2d(
-                in_channels=self.depths[0],
-                out_channels=input_size[0],
-                kernel_size=kernel,
-                stride=stride,
-                padding=self.padding,
-                dtype=dtype, device=device
+        # Turn this on for smaller representation on Laptop GPU
+        if not first_stride:
+            output_padding = 0 if i == 0 and first_stride else self.output_padding
+            backbone.append(
+                nn.ConvTranspose2d(
+                    in_channels=self.depths[0],
+                    out_channels=input_size[0],
+                    kernel_size=kernel,
+                    stride=stride,
+                    padding=self.padding,
+                    output_padding=output_padding,
+                    dtype=dtype, device=device
+                )
             )
-        )
-        current_height, current_width = self._compute_transposed_output_dim(current_height, current_width, kernel, stride, self.padding, 0)
-        self.final_output_dim = (input_size[0], current_height, current_width)                
+        else:
+            backbone.append(
+                nn.ConvTranspose2d(
+                    in_channels=self.depths[0],
+                    out_channels=input_size[0],
+                    kernel_size=kernel,
+                    stride=stride,
+                    padding=self.padding,
+                    dtype=dtype, device=device
+                )
+            )
+
+        current_height, current_width = self._compute_transposed_output_dim(current_height, current_width, kernel,
+                                                                            stride, self.padding, 0)
+        self.final_output_dim = (input_size[0], current_height, current_width)
         self.backbone = nn.Sequential(*backbone)
         self.backbone.apply(weight_init)
 
@@ -240,7 +267,7 @@ class CategoricalKLDivLossWithFreeBits(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, action_dim, config, device):
+    def __init__(self, action_dim, config, device, is_continuous=False):
         super().__init__()
         self.hidden_state_dim = config.Models.WorldModel.HiddenStateDim
         self.final_feature_width = config.Models.WorldModel.Transformer.FinalFeatureWidth
@@ -255,20 +282,23 @@ class WorldModel(nn.Module):
         self.imagine_batch_length = -1
         self.device = device # Maybe it's not needed
         self.model = config.Models.WorldModel.Backbone
-        self.max_grad_norm = config.Models.WorldModel.Max_grad_norm  
+        self.max_grad_norm = config.Models.WorldModel.Max_grad_norm
+        self.is_continuous = is_continuous
         max_seq_length = max(config.JointTrainAgent.BatchLength, 
                              config.JointTrainAgent.ImagineContextLength + config.JointTrainAgent.ImagineBatchLength, 
                              config.JointTrainAgent.RealityContextLength)
+        # Image encoder
         self.encoder = Encoder(
             depth=config.Models.WorldModel.Encoder.Depth,
-            mults=config.Models.WorldModel.Encoder.Mults, 
-            norm=config.Models.WorldModel.Encoder.Norm, 
-            act=config.Models.WorldModel.Act, 
+            mults=config.Models.WorldModel.Encoder.Mults,
+            norm=config.Models.WorldModel.Encoder.Norm,
+            act=config.Models.WorldModel.Act,
             kernel=config.Models.WorldModel.Encoder.Kernel,
             padding=config.Models.WorldModel.Encoder.Padding,
+            first_stride=config.Models.WorldModel.Decoder.FirstStrideOne,
             input_size=config.Models.WorldModel.Encoder.InputSize,
-            dtype=config.Models.WorldModel.dtype, device=device
-        )
+            dtype=config.Models.WorldModel.dtype, device=device)
+
         if self.model == 'Transformer':
             self.sequence_model = StochasticTransformerKVCache(
                 stoch_dim=self.stoch_flattened_dim,
@@ -299,6 +329,7 @@ class WorldModel(nn.Module):
                 n_layer=config.Models.WorldModel.Mamba.n_layer,
                 stoch_dim=self.stoch_flattened_dim,
                 action_dim=action_dim,
+                is_continuous=self.is_continuous,
                 dropout_p=config.Models.WorldModel.Dropout,
                 ssm_cfg={
                     'd_state': config.Models.WorldModel.Mamba.ssm_cfg.d_state, 
@@ -316,16 +347,16 @@ class WorldModel(nn.Module):
             class_dim=self.class_dim,
             unimix_ratio=config.Models.WorldModel.Unimix_ratio,
             dtype=config.Models.WorldModel.dtype, device=device
-        )      
+        )
         self.image_decoder = Decoder(
             stoch_dim=self.stoch_flattened_dim,
-            depth=config.Models.WorldModel.Decoder.Depth, 
-            mults=config.Models.WorldModel.Decoder.Mults, 
-            norm=config.Models.WorldModel.Decoder.Norm, 
-            act=config.Models.WorldModel.Act, 
-            kernel=config.Models.WorldModel.Decoder.Kernel, 
-            padding=config.Models.WorldModel.Decoder.Padding, 
-            first_stride=config.Models.WorldModel.Decoder.FirstStrideOne, 
+            depth=config.Models.WorldModel.Decoder.Depth,
+            mults=config.Models.WorldModel.Decoder.Mults,
+            norm=config.Models.WorldModel.Decoder.Norm,
+            act=config.Models.WorldModel.Act,
+            kernel=config.Models.WorldModel.Decoder.Kernel,
+            padding=config.Models.WorldModel.Decoder.Padding,
+            first_stride=config.Models.WorldModel.Decoder.FirstStrideOne,
             last_output_dim=self.encoder.output_dim,
             input_size=config.Models.WorldModel.Decoder.InputSize,
             cnn_sigmoid=config.Models.WorldModel.Decoder.FinalLayerSigmoid,
@@ -462,6 +493,12 @@ class WorldModel(nn.Module):
             scalar_size = (imagine_batch_size, imagine_batch_length)
             self.sample_buffer = torch.zeros(latent_size, dtype=dtype, device=device)
             self.dist_feat_buffer = torch.zeros(hidden_size, dtype=dtype, device=device)
+            if self.is_continuous:
+                self.action_buffer = torch.zeros((imagine_batch_size, imagine_batch_length, self.action_dim),
+                                                 dtype=dtype, device=device)
+            else:
+                # For discrete actions (Atari)
+                self.action_buffer = torch.zeros(scalar_size, dtype=dtype, device=device)
             self.action_buffer = torch.zeros(scalar_size, dtype=dtype, device=device)
             self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device=device)
             self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device=device)
@@ -598,7 +635,12 @@ class WorldModel(nn.Module):
             # sample_tensor = torch.cat(sample_list, dim=1)
             # dist_feat_tensor = torch.cat(dist_feat_list, dim=1)
             # action_tensor = torch.cat(action_list, dim=1)
-            old_logits_tensor = torch.cat(old_logits_list, dim=1)
+            if self.is_continuous:
+                means = torch.cat([ol[0] for ol in old_logits_list], dim=1)
+                logstds = torch.cat([ol[1] for ol in old_logits_list], dim=1)
+                old_logits_tensor = (means, logstds)
+            else:
+                old_logits_tensor = torch.cat(old_logits_list, dim=1)
 
             reward_hat_tensor = self.reward_decoder(self.dist_feat_buffer[:,:-1])
             self.reward_hat_buffer = self.symlog_twohot_loss_func.decode(reward_hat_tensor)

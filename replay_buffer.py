@@ -8,22 +8,49 @@ import pickle
 
 
 class ReplayBuffer():
-    def __init__(self, config, device="cuda") -> None:
+    def __init__(self, config, is_continuous, device="cuda") -> None:
         self.store_on_gpu = config.BasicSettings.ReplayBufferOnGPU
         max_length = config.JointTrainAgent.BufferMaxLength
         obs_shape = (config.BasicSettings.ImageSize, config.BasicSettings.ImageSize, config.BasicSettings.ImageChannel)
         self.device = device
+        self.is_continous = is_continuous
+
+        # Initialize with vector shape for continuous actions or scalar for discrete
+        if self.is_continuous:
+            # For MuJoCo/DMC, extract action dimensions from the environment
+            if config.BasicSettings.Env_name.startswith('mujoco'):
+                env_name = config.BasicSettings.Env_name.split(':')[-1]
+                # Create temporary environment just to get action shape
+                import gymnasium as gym
+                temp_env = gym.make(env_name)
+                self.action_shape = temp_env.action_space.shape
+                temp_env.close()
+            else:  # DMC
+                from envs.my_dmc import DMControl
+                parts = config.BasicSettings.Env_name.split(':')
+                # pass same args you use in train.py
+                temp = DMControl(domain_name=parts[1],
+                                 task_name=parts[2],
+                                 size=(config.BasicSettings.ImageSize, config.BasicSettings.ImageSize),
+                                 gray=False,
+                                 seed=config.BasicSettings.Seed,
+                                 camera_id=getattr(config.BasicSettings.DMControl, 'CameraId', 0),
+                                 frame_skip=getattr(config.BasicSettings.DMControl, 'FrameSkip', 4))
+                self.action_shape = temp.action_space.shape
+                temp.close()
+        else:
+            self.action_shape = ()  # Scalar shape for discrete actions
 
         if self.store_on_gpu:
             self.obs_buffer = torch.empty((max_length, *obs_shape), dtype=torch.uint8, device=device, requires_grad=False)
-            self.action_buffer = torch.empty((max_length), dtype=torch.float32, device=device, requires_grad=False)
+            self.action_buffer = torch.empty((max_length, *self.action_shape), dtype=torch.float32, device=device, requires_grad=False)
             self.reward_buffer = torch.empty((max_length), dtype=torch.float32, device=device, requires_grad=False)
             self.termination_buffer = torch.empty((max_length), dtype=torch.float32, device=device, requires_grad=False)
             self.sampled_counter = torch.zeros((max_length), dtype=torch.int32, device=device, requires_grad=False)
             self.imagined_counter = torch.zeros((max_length), dtype=torch.int32, device=device, requires_grad=False)
         else:
             self.obs_buffer = np.empty((max_length, *obs_shape), dtype=np.uint8)
-            self.action_buffer = np.empty((max_length), dtype=np.float32)
+            self.action_buffer = np.empty((max_length, *self.action_shape), dtype=np.float32)
             self.reward_buffer = np.empty((max_length), dtype=np.float32)
             self.termination_buffer = np.empty((max_length), dtype=np.float32)
             self.sampled_counter = np.zeros((max_length), dtype=np.int32)

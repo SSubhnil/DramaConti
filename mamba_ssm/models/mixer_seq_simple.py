@@ -161,6 +161,7 @@ class MixerModel(nn.Module):
         d_intermediate: int,
         stoch_dim: int,
         action_dim: int,
+        is_continuous=False,
         ssm_cfg=None,
         attn_layer_idx=None,
         attn_cfg=None,
@@ -180,6 +181,7 @@ class MixerModel(nn.Module):
 
         self.action_dim = action_dim
         self.feat_dim = d_model
+        self.is_continuous = is_continuous
 
         # self.embedding = nn.Embedding(vocab_size, d_model, **factory_kwargs)
 
@@ -245,7 +247,8 @@ class MixerModel(nn.Module):
         }
 
     def forward(self, samples, action, inference_params=None, **mixer_kwargs):
-        action = F.one_hot(action.long(), self.action_dim).float()
+        if not self.is_continuous:
+            action = F.one_hot(action.long(), self.action_dim).float()
         hidden_states = self.stem(torch.cat([samples, action], dim=-1))
             
         residual = None
@@ -288,6 +291,7 @@ class MambaWrapperModel(nn.Module, GenerationMixin):
         d_intermediate = config.d_intermediate
         stoch_dim = config.stoch_dim
         action_dim = config.action_dim
+        self.is_continuous = config.is_continuous
         ssm_cfg = config.ssm_cfg
         attn_layer_idx = config.attn_layer_idx
         attn_cfg = config.attn_cfg
@@ -305,6 +309,7 @@ class MambaWrapperModel(nn.Module, GenerationMixin):
             d_intermediate=d_intermediate,
             stoch_dim=stoch_dim,
             action_dim=action_dim,
+            is_continuous=self.is_continuous,
             ssm_cfg=ssm_cfg,
             pff_cfg = pff_cfg,         
             attn_layer_idx=attn_layer_idx,

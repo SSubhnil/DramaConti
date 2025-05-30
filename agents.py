@@ -95,7 +95,7 @@ class VecNormalize(nn.Module):
             return x_normalized.view(B, L, D)
     
 class ActorCriticAgent(nn.Module):
-    def __init__(self, conf, action_dim, device) -> None:
+    def __init__(self, conf, action_dim, device, is_continuous=False) -> None:
         super().__init__()
         feat_dim=conf.Models.WorldModel.CategoricalDim*conf.Models.WorldModel.ClassDim+conf.Models.WorldModel.HiddenStateDim
         num_layers=conf.Models.Agent.AC.NumLayers
@@ -110,6 +110,7 @@ class ActorCriticAgent(nn.Module):
         self.action_dim = action_dim
         self.unimix_ratio = conf.Models.Agent.Unimix_ratio
         self.device = device
+        self.is_continuous = is_continous
 
         self.symlog_twohot_loss = SymLogTwoHotLoss(255, -20, 20)
         act = getattr(nn, conf.Models.Agent.AC.Act)
@@ -274,12 +275,13 @@ class ActorCriticAgent(nn.Module):
 
 
 class PPOAgent(nn.Module):
-    def __init__(self, conf, action_dim, device):
+    def __init__(self, conf, action_dim, device, is_continous=False):
         super().__init__()
         feat_dim=conf.Models.WorldModel.CategoricalDim*conf.Models.WorldModel.ClassDim+conf.Models.WorldModel.HiddenStateDim
         num_layers=conf.Models.Agent.PPO.NumLayers
         actor_hidden_dim=conf.Models.Agent.PPO.Actor.HiddenUnits
-        critic_hidden_dim=conf.Models.Agent.PPO.Critic.HiddenUnits      
+        critic_hidden_dim=conf.Models.Agent.PPO.Critic.HiddenUnits
+        self.is_continuous = is_continous
         self.gamma = conf.Models.Agent.PPO.Gamma
         self.lambd = conf.Models.Agent.PPO.Lambda
         self.entropy_coef = conf.Models.Agent.PPO.EntropyCoef

@@ -18,6 +18,10 @@ from line_profiler import profile
 import yaml
 from envs.my_memory_maze import MemoryMaze
 from envs.my_atari import Atari
+from envs.my_dmc import DMControl
+from envs.my_procgen import ProcGen
+from envs.my_mujoco import MuJoCo
+from envs.my_minigrid import MiniGrid
 from eval import eval_episodes
 import warnings
 import ast
@@ -91,17 +95,62 @@ def world_model_imagine_data(replay_buffer: ReplayBuffer,
     return latent, action, old_logits, context_latent, sample_reward, sample_termination, reward_hat, termination_hat
 
 @profile
-def joint_train_world_model_agent(config, logdir,
+def joint_train_world_model_agent(config, logdir, is_continuous,
                                   replay_buffer: ReplayBuffer,
                                   world_model: WorldModel, agent: agents.ActorCriticAgent,
                                   logger):
     os.makedirs(f"{logdir}/ckpt", exist_ok=True)
 
-
     if config.BasicSettings.Env_name.startswith('ALE'):
         env = Atari(config.BasicSettings.Env_name, size=(config.BasicSettings.ImageSize,config.BasicSettings.ImageSize), seed=config.BasicSettings.Seed)
     elif config.BasicSettings.Env_name.startswith('memory'):
         env = MemoryMaze(config.BasicSettings.Env_name, size=(config.BasicSettings.ImageSize,config.BasicSettings.ImageSize), seed=config.BasicSettings.Seed)
+    elif config.BasicSettings.Env_name.startswith('procgen'):
+        # Extract the environment name from the full string (e.g., "procgen:procgen-coinrun-v0")
+        env_name = config.BasicSettings.Env_name.split(':')[-1]
+        env = ProcGen(env_name,
+                      size=(config.BasicSettings.ImageSize, config.BasicSettings.ImageSize),
+                      seed=config.BasicSettings.Seed,
+                      distribution_mode=config.ProcGen.DistMode if hasattr(config, 'ProcGen') else "hard",
+                      num_levels=config.ProcGen.NumLevels if hasattr(config, 'ProcGen') else 0,
+                      start_level=config.ProcGen.StartLevel if hasattr(config, 'ProcGen') else 0)
+    elif config.BasicSettings.Env_name.startswith('mujoco'):
+        # Extract the environment name from the full string (e.g., "mujoco:Humanoid-v4")
+        env_name = config.BasicSettings.Env_name.split(':')[-1]
+        env = MuJoCo(env_name,
+                     size=(config.BasicSettings.ImageSize, config.BasicSettings.ImageSize),
+                     seed=config.BasicSettings.Seed,
+                     camera_id=config.MuJoCo.CameraId if hasattr(config, 'MuJoCo') else 0,
+                     render_context=config.MuJoCo.RenderContext if hasattr(config, 'MuJoCo') else "EGL",
+                     frame_skip=config.MuJoCo.FrameSkip if hasattr(config, 'MuJoCo') else 1)
+        is_continuous = True
+    elif config.BasicSettings.Env_name.startswith('dmc'):
+        # Extract domain and task name (format: "dmc:domain_name:task_name")
+        parts = config.BasicSettings.Env_name.split(':')
+        domain_name = parts[1]
+        task_name = parts[2]
+
+        env = DMControl(
+            domain_name=domain_name,
+            task_name=task_name,
+            size=(config.BasicSettings.ImageSize, config.BasicSettings.ImageSize),
+            gray=False,
+            seed=config.BasicSettings.Seed,
+            camera_id=config.DMControl.CameraId if hasattr(config, 'DMControl') else 0,
+            frame_skip=config.DMControl.FrameSkip if hasattr(config, 'DMControl') else 4
+        )
+        is_continuous = True
+    elif config.BasicSettings.Env_name.startswith('minigrid'):
+        env_name = config.BasicSettings.Env_name.split(':')[-1]
+        env = MiniGrid(
+            env_name,
+            size=(config.BasicSettings.ImageSize, config.BasicSettings.ImageSize),
+            gray=False,  # Set to True if you want grayscale observations
+            seed=config.BasicSettings.Seed,
+            fully_observed=config.MiniGrid.FullyObserved if hasattr(config, 'MiniGrid') else False,
+            max_steps=config.MiniGrid.MaxSteps if hasattr(config, 'MiniGrid') else 1000
+        )
+
     else:
         assert ValueError(f'Unknown environment name: {config.BasicSettings.Env_name}')
     print("Current env: " + colorama.Fore.YELLOW + f"{config.BasicSettings.Env_name}" + colorama.Style.RESET_ALL)
@@ -127,7 +176,12 @@ def joint_train_world_model_agent(config, logdir,
                 else:
                     context_latent = world_model.encode_obs(torch.cat(list(context_obs), dim=1).to(world_model.device))
                     model_context_action = np.stack(list(context_action))
-                    model_context_action = rearrange(torch.Tensor(model_context_action).to(world_model.device), "L -> 1 L")
+                    if is_continuous:
+                        model_context_action = rearrange(torch.Tensor(model_context_action).to(world_model.device),
+                                                         "L A-> 1 L A")
+                    else:
+                        model_context_action = rearrange(torch.Tensor(model_context_action).to(world_model.device),
+                                                         "L -> 1 L")
                     if world_model.model == 'Transformer':
                         prior_flattened_sample, last_dist_feat = world_model.calc_last_dist_feat(context_latent, model_context_action)
                     elif world_model.model == 'Mamba' or world_model.model == 'Mamba2':
@@ -151,22 +205,29 @@ def joint_train_world_model_agent(config, logdir,
         if is_last:
             logger.log(f"episode/score", sum_reward, global_step=total_steps)
             logger.log(f"episode/length", info["episode_frame_number"], global_step=total_steps)  # framskip=4
-            if config.BasicSettings.Env_name.startswith('ALE'):
-                logger.log(f"episode/normalised score", (sum_reward - game_benchmark_df['Random'])/(game_benchmark_df['Human'] - game_benchmark_df['Random']), global_step=total_steps)
-                for algorithm in game_benchmark_df.index[2:]:
-                    denominator = game_benchmark_df[algorithm] - game_benchmark_df['Random']
-                    if denominator != 0:
-                        normalized_score = (sum_reward - game_benchmark_df['Random']) / denominator
-                        logger.log(f"benchmark/normalised {algorithm} score", normalized_score, global_step=total_steps)
+            # Use following condition to run games not in Atari100k
+            if config.BasicSettings.Env_name.startswith('ALE') and game_benchmark_df is not None:
+                try:
+                    # Log normalized score relative to human preference
+                    logger.log(f"episode/normalised score", (sum_reward - game_benchmark_df['Random']) / (
+                            game_benchmark_df['Human'] - game_benchmark_df['Random']), global_step=total_steps)
+                    for algorithm in game_benchmark_df.index[2:]:
+                        denominator = game_benchmark_df[algorithm] - game_benchmark_df['Random']
+                        if denominator != 0:
+                            normalized_score = (sum_reward - game_benchmark_df['Random']) / denominator
+                            logger.log(f"benchmark/normalised {algorithm} score", normalized_score,
+                                       global_step=total_steps)
+                except (KeyError, TypeError) as e:
+                    if total_steps == 0:  # Only print once to avoid spam
+                        print(f"Warning: Error calculating benchmark scores: {e}")
             
             sum_reward = 0
             ob, info = env.reset()
             context_obs.clear()
             context_action.clear()
 
-
-
-        if replay_buffer.ready('world_model') and total_steps % (config.JointTrainAgent.TrainDynamicsEverySteps // config.JointTrainAgent.NumEnvs) == 0 and total_steps <= config.JointTrainAgent.FreezeWorldModelAfterSteps:
+        if replay_buffer.ready('world_model') and total_steps % (
+                config.JointTrainAgent.TrainDynamicsEverySteps // config.JointTrainAgent.NumEnvs) == 0 and total_steps <= config.JointTrainAgent.FreezeWorldModelAfterSteps:
             train_world_model_step(
                 replay_buffer=replay_buffer,
                 world_model=world_model,
@@ -215,26 +276,26 @@ def joint_train_world_model_agent(config, logdir,
 
 
 
-def build_world_model(conf, action_dim, device):
+def build_world_model(conf, action_dim, is_continuous, device):
     return WorldModel(
         action_dim = action_dim,
         config = conf, 
-        device = device
+        device = device, is_continuous=is_continuous
     ).cuda(device)
 
 
-def build_agent(conf, action_dim, device):
+def build_agent(conf, action_dim, is_continuous, device):
     if conf.Models.Agent.Policy == 'AC':
         return agents.ActorCriticAgent(
             conf = conf,
             action_dim=action_dim,
-            device = device
+            device = device, is_continuous=is_continuous
         ).cuda(device)
     elif conf.Models.Agent.Policy == 'PPO':
         return agents.PPOAgent(
             conf=conf,
             action_dim=action_dim,
-            device = device
+            device = device, is_continous=is_continuous
         ).cuda(device)        
 
 
@@ -351,20 +412,41 @@ if __name__ == "__main__":
     # set seed
     seed_np_torch(seed=config.BasicSettings.Seed)
 
-    
+    is_continuous = False
     # getting action_dim with dummy env
     if config.BasicSettings.Env_name.startswith('ALE'):
         dummy_env = Atari(config.BasicSettings.Env_name)
     elif config.BasicSettings.Env_name.startswith('memory'):
         dummy_env = MemoryMaze(config.BasicSettings.Env_name)
+    elif config.BasicSettings.Env_name.startswith('procgen'):
+        # Extract the environment name from the full string (e.g., "procgen:procgen-coinrun-v0")
+        env_name = config.BasicSettings.Env_name.split(':')[-1]
+        dummy_env = ProcGen(env_name)
+        action_dim = dummy_env.action_space.n
+    elif config.BasicSettings.Env_name.startswith('minigrid'):
+        # Extract the environment name from the full string (e.g., "procgen:procgen-coinrun-v0")
+        env_name = config.BasicSettings.Env_name.split(':')[-1]
+        dummy_env = MiniGrid(env_name)
+        action_dim = dummy_env.action_space.n
+    elif config.BasicSettings.Env_name.startswith('mujoco'):
+        # Extract the environment name from the full string (e.g., "mujoco:Humanoid-v4")
+        env_name = config.BasicSettings.Env_name.split(':')[-1]
+        dummy_env = MuJoCo(env_name)
+        action_dim = np.prod(dummy_env.action_space.shape)
+        is_continuous = True
+    elif config.BasicSettings.Env_name.startswith('dmc'):
+        parts = config.BasicSettings.Env_name.split(':')
+        domain_name = parts[1]
+        task_name = parts[2]
+        dummy_env = DMControl(domain_name=domain_name, task_name=task_name)
+        action_dim = np.prod(dummy_env.action_space.shape)
+        is_continuous = True
     else:
         assert ValueError(f'Unknown environment name: {config.BasicSettings.Env_name}')
 
-    action_dim = dummy_env.action_space.n
-
     # build world model and agent
-    world_model = build_world_model(config, action_dim, device=device)
-    agent = build_agent(config, action_dim, device=device)
+    world_model = build_world_model(config, action_dim, is_continuous, device=device)
+    agent = build_agent(config, action_dim, is_continuous, device=device)
     update_model_parameters(config, world_model, agent)
     if (config.BasicSettings.Compile and os.name != "nt"):  # compilation is not supported on windows
         world_model = torch.compile(world_model)
@@ -380,11 +462,12 @@ if __name__ == "__main__":
     # build replay buffer
     replay_buffer = ReplayBuffer(
         config,
+        is_continuous,
         device=device
     )
 
     # train
-    joint_train_world_model_agent(config, logdir, replay_buffer, world_model, agent, logger)
+    joint_train_world_model_agent(config, logdir, is_continuous, replay_buffer, world_model, agent, logger)
 
     logger.close()
 
